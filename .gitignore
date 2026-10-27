@@ -1,0 +1,17 @@
+node_modules
+.next
+out
+coverage
+*.tsbuildinfo
+next-env.d.ts
+.vercel
+.DS_Store
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# local evaluation output and uploaded reports
+data/eval/results/
+*.pdf

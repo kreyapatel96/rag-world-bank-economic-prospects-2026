@@ -1,0 +1,8 @@
+[
+  {
+    "id": "example-1",
+    "question": "Replace this entry with a real question from the supplied sample-question set.",
+    "expectedAnswer": "Optional reference answer used for LLM-judged correctness.",
+    "relevantPages": [12, 13]
+  }
+]

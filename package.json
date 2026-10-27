@@ -1,0 +1,48 @@
+{
+  "name": "worldbank-rag",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:init": "tsx --env-file-if-exists=.env.local scripts/init-db.ts",
+    "ingest": "tsx --env-file-if-exists=.env.local scripts/ingest.ts",
+    "eval": "tsx --env-file-if-exists=.env.local scripts/evaluate.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.30.0",
+    "mongodb": "^7.7.0",
+    "next": "^16.4.2",
+    "pdfjs-dist": "^6.4.299",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "unpdf": "^1.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.4.2",
+    "pdf-lib": "^1.17.1",
+    "postcss": "^8.5.31",
+    "prettier": "^3.9.10",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}
