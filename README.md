@@ -93,21 +93,13 @@ The free Atlas tier allows only 3 search indexes in total. If `db:init` says the
 
 Command line alternatives: `npm run ingest -- report.pdf` and `npm run eval`.
 
-## Deploying to Vercel
-
-Push to GitHub, import the repo, and add the same environment variables. Keep in mind:
-
-- Ollama does not run on Vercel. Without a hosted Ollama, embeddings fail, so search falls back to keywords only and the fallback model is unavailable.
-- Vercel limits uploads to about 4.5 MB and functions to a few minutes. For a large PDF, run `npm run ingest` from your machine against the same Atlas database.
-- Add authentication (for example Vercel password protection): the app has none, so anyone with the URL could upload, delete and use your Gemini quota.
-
 ## Known limits
 
 - Headings, tables and columns are found with heuristics. Always check a new PDF's processing notes and a few answers. Brochure-style layouts with three or more columns can mix text.
 - No OCR: scanned PDFs are rejected.
 - Ollama on a CPU-only machine is slow and follows citation rules less reliably than Gemini.
 - Page numbers are PDF page positions, which can differ from the numbers printed on the pages.
-- Not tested against a real Vercel deployment.
+- There is no login. Anyone who can open the app can upload, delete and use your Gemini quota, so run it only on your own machine or network.
 
 ## Development
 
