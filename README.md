@@ -1,73 +1,77 @@
-# World Bank Report Q&A (RAG)
+# World Bank Report Q&A
 
-Retrieval-augmented question answering over a long World Bank economic report. Next.js (App Router), TypeScript strict, Tailwind, MongoDB Atlas (storage and Vector Search), Gemini as the primary LLM, Ollama as fallback and for embeddings.
+Ask questions about a long World Bank report and get short answers with page citations.
+
+Next.js · TypeScript · MongoDB Atlas (storage + vector search) · Gemini (main model) · Ollama (fallback + embeddings)
 
 ## How it works
 
-1. **Ingest**: PDF is stored in MongoDB GridFS, text is extracted page by page (`unpdf`/pdf.js, with font sizes and positions), running headers/footers and page numbers are removed, headings are detected (chapter patterns, font-size ranking, numbered headings, all-caps lines), tables are detected from column alignment, and the result is chunked as Document → Chapter → Section → Subsection → Chunk.
-2. **Index**: each chunk is embedded with `OLLAMA_EMBEDDING_MODEL` (breadcrumb + text) and stored in MongoDB. A persistent BM25 inverted index (`bm25_postings`, `bm25_stats`) is built from the same text.
-3. **Retrieve**: query → Atlas `$vectorSearch` and BM25 in parallel → Reciprocal Rank Fusion → top `RERANK_TOP_K` chunks. If semantic search is unavailable (no Ollama, missing index, model mismatch) retrieval degrades to keyword-only and says so in the UI.
-4. **Context**: chunks are grouped by section, expanded to the whole section when several hits share one and it fits, near-duplicates are dropped, and everything is cut to `MAX_CONTEXT_TOKENS`. Each passage carries a source tag (`[S1]`) with pages and section path.
-5. **Answer**: the prompt tells the model to use only the passages and cite `[S#]`. Markers that do not match a passage are stripped; the UI shows only citations that map to retrieved text.
+1. **Upload** a PDF. It is read page by page (two-column pages are read column by column), headers and footers are removed, headings and tables are detected, and the text is cut into chunks made of whole sentences. Every chunk keeps its chapter, section and page numbers.
+2. **Index**: each chunk gets an embedding (Ollama `nomic-embed-text`) and goes into a keyword index (BM25).
+3. **Ask**: the question is searched both ways, results are merged (Reciprocal Rank Fusion), and the best passages go to Gemini. If Gemini fails, Ollama answers instead.
+4. **Answer** appears on the left; the passages it cites, with page numbers, appear in the **References** panel on the right.
 
-No reranker is included: no practical, actively maintained JavaScript cross-encoder was adopted. `RERANK_TOP_K` is the number of fused candidates kept.
+The app holds **one report at a time**: uploading a new PDF deletes the old one and its data (you are asked to confirm).
 
-### Chunking methods
+## What this project uses
 
-The method is chosen automatically from `CHUNKING_STRATEGY` (default `hierarchical`); there is no selector in the UI. Each document card has a **How this report was processed** list showing what was actually applied (column-aware reading, cleaning, structure, chunking method, tables, indexing). The API still accepts an optional `strategy` on upload and reprocess. All methods pack **whole sentences**, so a chunk never starts or ends mid-sentence (only a single sentence larger than `CHUNK_MAX_TOKENS` is split, at clause boundaries first). Section, chapter and page metadata are kept by every method, and tables are always their own chunks with headers repeated.
+**Models**
 
-| Method                   | Behaviour                                                                                            | Good for                                |
-| ------------------------ | ---------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| `hierarchical` (default) | Sentences packed to `CHUNK_TARGET_TOKENS` inside each section, with sentence overlap                 | General questions, balanced context     |
-| `paragraph`              | One chunk per paragraph; tiny paragraphs merged forward, oversized ones split at sentence boundaries | Narrative reports with clear paragraphs |
-| `sentence_window`        | Sliding windows of `CHUNK_WINDOW_SENTENCES` sentences, half-window stride                            | Precise fact lookup (small chunks)      |
-| `topic_shift`            | Splits where the vocabulary of neighbouring sentences changes most (lexical, no model calls)         | Long sections that mix topics           |
+| Job                        | Model                                                                  | Notes                                       |
+| -------------------------- | ---------------------------------------------------------------------- | ------------------------------------------- |
+| Answers (main)             | Google Gemini, set by `GEMINI_MODEL` (tested with `gemini-3.5-flash`)  | via the official `@google/genai` SDK        |
+| Answers (fallback / local) | Ollama chat model, set by `OLLAMA_CHAT_MODEL` (tested with `llama3.2`) | runs on your machine                        |
+| Embeddings                 | Ollama `nomic-embed-text` (768 dimensions)                             | same model for the report and for questions |
 
-At query time the context builder also expands to the parent section when several hits share it, so small chunks still give the model surrounding context. Compare methods with the evaluation run, not by intuition.
+**Chunking** (how the report is cut up)
 
-### Two-column pages
+| Technique                                              | What it does                                                                                                           |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Column-aware reading                                   | Two-column pages are read left column, then right column                                                               |
+| Section-aware (hierarchical) chunking, **the default** | Chapter → section → subsection; text is packed into chunks of about 400 tokens (max 600) with a small sentence overlap |
+| Whole sentences only                                   | Chunks start and end at sentence boundaries; a paragraph is kept whole when it fits                                    |
+| Table chunks                                           | Each table row is stored with its column headers                                                                       |
+| Metadata on every chunk                                | Chapter, section, subsection, page range and order                                                                     |
 
-Text is read in column order (left column top to bottom, then right), full-width headings and tables break the flow, and a sentence that continues from the left column into the right is joined. Detection is per page (a clear vertical gutter with long text lines on both sides); anything else is read as a single column. Pages read this way are listed in the document's processing notes. Mixed layouts, sidebars and pull-quotes can still interleave.
+Three other methods exist and can be switched with `CHUNKING_STRATEGY` in `.env.local`: `paragraph` (one chunk per paragraph), `sentence_window` (sliding window of 5 sentences) and `topic_shift` (split where the topic changes). Each report's card in the app lists what was actually applied to it.
 
-### Defaults
+**Retrieval and answering**
 
-| Setting                               | Default          | Variable                                                          |
-| ------------------------------------- | ---------------- | ----------------------------------------------------------------- |
-| Chunking method / window sentences    | hierarchical / 5 | `CHUNKING_STRATEGY`, `CHUNK_WINDOW_SENTENCES`                     |
-| Chunk target / max / overlap (tokens) | 400 / 600 / 60   | `CHUNK_TARGET_TOKENS`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP_TOKENS` |
-| Candidates per retriever              | 20               | `RETRIEVAL_TOP_K`                                                 |
-| Chunks kept after fusion              | 8                | `RERANK_TOP_K`                                                    |
-| Context budget (tokens)               | 6000             | `MAX_CONTEXT_TOKENS`                                              |
-| RRF constant                          | 60               | `RRF_K`                                                           |
-| LLM timeout                           | 60000 ms         | `LLM_TIMEOUT_MS`                                                  |
-| Upload limit                          | 50 MB            | `MAX_UPLOAD_SIZE_MB`                                              |
+| Step      | Method                                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Search    | Semantic (Atlas Vector Search) + keyword (BM25), merged with Reciprocal Rank Fusion                                      |
+| Context   | Best passages first, near-duplicates removed, neighbouring chunks of the same section joined, kept within a token budget |
+| Prompt    | Answer only from the passages, cite `[S1]`-style sources, say so when the report does not cover the question             |
+| Citations | Only sources that were really retrieved are shown, with page numbers                                                     |
+| Reranker  | None                                                                                                                     |
 
-Blank values in `.env.local` fall back to these defaults. Tokens are estimated (`max(chars/4, words*1.3)`), not counted with a model tokenizer. Overlap is measured in whole sentences, so an overlap smaller than one sentence produces none.
+## Setup
 
-Page numbers are the **physical PDF page index** (1-based), which can differ from printed page labels.
-
-## 1. Prerequisites and installation
-
-- Node.js 20.9 or newer (developed on Node 22). Check with `node -v`.
-- A MongoDB Atlas cluster, a Gemini API key, and Ollama for embeddings (and optional local chat).
+You need Node.js 20.9+, a MongoDB Atlas cluster, a Gemini API key and [Ollama](https://ollama.com).
 
 ```bash
 npm install
-cp .env.example .env.local   # then fill in values; never commit this file
+cp .env.example .env.local        # then fill in the values
+ollama pull nomic-embed-text      # embeddings (required)
+ollama pull llama3.2              # local chat model (or any model you set in OLLAMA_CHAT_MODEL)
+npm run db:init                   # creates indexes, including the vector index
+npm run dev                       # http://localhost:3000
 ```
 
-## 2. MongoDB Atlas
+Main settings in `.env.local`:
 
-1. Create a cluster (a free M0 works for one report) and a database user.
-2. Under Network Access, allow your IP (and Vercel's egress, see deployment).
-3. Put the connection string in `MONGODB_URI`.
-4. Create collections and standard indexes: `npm run db:init`.
+| Variable                                                | Meaning                                                                  |
+| ------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `MONGODB_URI`                                           | Atlas connection string                                                  |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`                        | Gemini key and a model your key can use (for example `gemini-3.5-flash`) |
+| `OLLAMA_CHAT_MODEL`                                     | Local fallback model, for example `llama3.2`                             |
+| `MAX_CONTEXT_TOKENS`, `RETRIEVAL_TOP_K`, `RERANK_TOP_K` | How much text is retrieved and sent to the model (blank = defaults)      |
 
-Collections: `documents`, `sections`, `chunks`, `bm25_postings`, `bm25_stats`, `eval_runs`, and GridFS bucket `pdf_files`. A collection alone does not enable vector search; the Vector Search index below is required.
+Other optional settings (chunk size, timeouts) are in `src/lib/config/env.ts`. Secrets stay on the server and `.env.local` is git-ignored.
 
-## 3. Atlas Vector Search index
+### Atlas Vector Search index
 
-`npm run db:init` creates it (default 768 dimensions for `nomic-embed-text`; use `npm run db:init -- --dimensions=1024` for another model). To create it manually, use Atlas UI → Search → Create Search Index → Atlas Vector Search (JSON editor), collection `chunks`, index name equal to `MONGODB_VECTOR_INDEX_NAME`:
+`npm run db:init` creates it. To create it by hand in Atlas (collection `chunks`, name = `MONGODB_VECTOR_INDEX_NAME`):
 
 ```json
 {
@@ -79,97 +83,32 @@ Collections: `documents`, `sections`, `chunks`, `bm25_postings`, `bm25_stats`, `
 }
 ```
 
-Wait until the index is queryable. The **System status** menu in the UI reports a missing, building, or dimension-mismatched index. Every chunk stores its `embeddingModel`; a document embedded with a different model than currently configured is not searched semantically until reprocessed. If you change to a model with different dimensions, drop and recreate the index with the new `numDimensions`, then reprocess documents.
+The free Atlas tier allows only 3 search indexes in total. If `db:init` says the limit is reached, delete one you do not use. The **System status** menu in the app shows whether MongoDB, the index, Gemini and Ollama are ready.
 
-## 4. Gemini
+## Using it
 
-Create a key in Google AI Studio and set `GEMINI_API_KEY` and `GEMINI_MODEL` (choose a current model from the AI Studio model list; no default is assumed). The key is read only on the server. Transient errors (429 rate limit, 5xx, timeouts, network) are retried up to 3 times with exponential backoff and jitter; invalid credentials and exhausted quota are not retried and trigger fallback immediately.
+- **Documents tab**: upload the PDF, watch progress, reprocess or delete. The card lists what was done to the report (columns, cleaning, headings, tables, chunking).
+- **Chat tab**: pick Gemini with Ollama fallback, Ollama only, or Compare (both side by side).
+- **Evaluation tab**: runs the questions in `data/eval/questions.json` (or `.csv`; see `data/eval/questions.example.json` for the format). Add `relevantPages` to get recall and precision. Scores appear only after a real run.
 
-## 5–6. Ollama and models
+Command line alternatives: `npm run ingest -- report.pdf` and `npm run eval`.
 
-Install from <https://ollama.com>, start it (`ollama serve` or the desktop app), then pull models. The app never downloads models on its own.
+## Deploying to Vercel
 
-```bash
-ollama pull nomic-embed-text     # required: document and query embeddings (768 dims)
-ollama pull <chat-model>         # e.g. llama3.1:8b, then set OLLAMA_CHAT_MODEL to the same name
-```
+Push to GitHub, import the repo, and add the same environment variables. Keep in mind:
 
-## 7. Run the app
+- Ollama does not run on Vercel. Without a hosted Ollama, embeddings fail, so search falls back to keywords only and the fallback model is unavailable.
+- Vercel limits uploads to about 4.5 MB and functions to a few minutes. For a large PDF, run `npm run ingest` from your machine against the same Atlas database.
+- Add authentication (for example Vercel password protection): the app has none, so anyone with the URL could upload, delete and use your Gemini quota.
 
-```bash
-npm run dev      # http://localhost:3000
-npm run build && npm start   # production mode
-```
+## Known limits
 
-## 8. Ingest the report
+- Headings, tables and columns are found with heuristics. Always check a new PDF's processing notes and a few answers. Brochure-style layouts with three or more columns can mix text.
+- No OCR: scanned PDFs are rejected.
+- Ollama on a CPU-only machine is slow and follows citation rules less reliably than Gemini.
+- Page numbers are PDF page positions, which can differ from the numbers printed on the pages.
+- Not tested against a real Vercel deployment.
 
-Either upload the PDF in the **Documents** tab, or use the CLI (recommended for large files, uses the same pipeline):
+## Development
 
-```bash
-npm run ingest -- /path/to/report.pdf
-```
-
-The app holds **one report at a time**: uploading a PDF first deletes every existing document (pages, sections, chunks, keyword index, stored PDF and evaluation runs), then ingests the new one. The UI asks for confirmation, and the upload is refused while another document is still processing. Uploading the same file again simply reprocesses it. Reprocessing replaces the document's chunks, sections, and keyword index. Deleting removes the document, chunks, sections, keyword index, stored PDF, and evaluation runs.
-
-## 9. Evaluation
-
-No sample-question file was present in the workspace when this was built, so none is bundled. Place your supplied questions at `data/eval/questions.json` or `data/eval/questions.csv` (see `data/eval/questions.example.json`; it is a format example and is never loaded). Fields: `id`, `question`, optional `expectedAnswer`, optional `relevantPages` (array, or `"12;15-17"` in CSV). Alternative field names `answer`, `pages`, `reference_answer` are accepted.
-
-```bash
-npm run eval -- --mode=gemini_fallback --judge=none          # or --mode=compare|ollama, --judge=gemini|ollama
-npm run eval -- --questions=path/to/file.csv --limit=10
-```
-
-or use the **Evaluation** tab. Reports are saved to MongoDB (`eval_runs`) and, locally, to `data/eval/results/`.
-
-Metrics: hit rate, Recall@K, Precision@K and MRR (page overlap with `relevantPages`; only labelled questions), citation accuracy (cited passages overlapping labelled pages), latency, provider failure rate and categories. Answer correctness and unsupported-claim rate are **LLM-judged** (judge model selectable; null when `--judge=none`) and are not human-verified. RAGAS is not used. The dashboard shows nothing until a run completes.
-
-## 10. Deploy to Vercel
-
-1. Push to GitHub and import the repo in Vercel.
-2. Set all variables from `.env.example` in Project Settings → Environment Variables.
-3. In Atlas Network Access allow Vercel (Vercel egress IPs are dynamic; `0.0.0.0/0` with strong credentials is the common choice on non-static plans).
-4. Point `OLLAMA_BASE_URL` at a reachable, hosted Ollama endpoint, or accept the limits below.
-5. Create the vector index (`npm run db:init`, run locally against the same Atlas cluster).
-
-## 11. What needs external hosting
-
-| Feature                        | Local                                     | Vercel                                                                                                                                                                                                                                    |
-| ------------------------------ | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Gemini answers                 | yes                                       | yes (needs `GEMINI_API_KEY`)                                                                                                                                                                                                              |
-| Embeddings and semantic search | yes                                       | **needs a hosted Ollama** reachable from Vercel; otherwise queries fall back to keyword-only                                                                                                                                              |
-| Ollama chat / fallback         | yes                                       | only with a hosted Ollama; unreachable endpoints fail fast (3 s check) and are reported                                                                                                                                                   |
-| PDF upload in the UI           | up to `MAX_UPLOAD_SIZE_MB`                | request bodies are capped at about 4.5 MB on Vercel; use `npm run ingest` locally for large reports                                                                                                                                       |
-| Ingestion                      | in-process after the response (`after()`) | limited by function duration (`maxDuration = 300`); a 200-page report with Ollama embeddings may exceed it. `runIngestion(documentId)` is independent of Next.js, so it can run in a separate worker, which is what `npm run ingest` does |
-| Evaluation                     | UI or CLI                                 | UI limited by function duration; use the CLI for full sets                                                                                                                                                                                |
-| Original PDFs                  | GridFS in Atlas                           | GridFS in Atlas (no local disk used)                                                                                                                                                                                                      |
-
-## 12. Known limitations
-
-- The ingestion heuristics (headings, tables, header/footer removal) were validated on a generated PDF and unit tests, **not on the real World Bank report**. Inspect the first ingestion (section counts, processing notes, retrieved chunks) and tune if needed.
-- Table extraction is column-alignment based: no ruling lines, no merged cells, no tables continued across pages. Uncertain tables carry an extraction note in the chunk and UI. Scanned PDFs are not supported (no OCR); they fail with a clear error.
-- No authentication or rate limiting: anyone with the URL can upload, delete, and spend Gemini quota. Enable Vercel Deployment Protection or add auth before exposing it.
-- Chat history is kept in the browser session only.
-- No reranker; token counts are estimates; Atlas vector search needs Atlas (or an Atlas local deployment).
-- Compare mode does not judge which model is better; use the evaluation run for that.
-- Not verified in this build environment: calls against a live MongoDB Atlas cluster, Gemini, or Ollama (no credentials or Ollama installation were available), and a real Vercel deployment.
-
-## Scripts
-
-`npm run dev | build | start | lint | typecheck | test | format | db:init | ingest | eval`
-
-## Layout
-
-```
-src/app            pages and API route handlers (documents, ask, compare, evaluate, health)
-src/components     UI
-src/lib/db         connection, schemas, indexes
-src/lib/ingestion  extraction, cleaning, structure, tables, chunker, pipeline, storage
-src/lib/retrieval  tokenizer, BM25, vector search, fusion, retriever
-src/lib/context    token estimate, context builder, prompt
-src/lib/llm        Gemini, Ollama, retry, fallback/compare orchestration
-src/lib/citations  citation parsing and formatting
-src/lib/evaluation dataset parsing, metrics, judge, runner
-scripts            db:init, ingest, eval CLIs
-tests              Vitest suites
-```
+`npm test` · `npm run typecheck` · `npm run lint` · `npm run build`
